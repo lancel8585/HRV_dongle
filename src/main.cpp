@@ -1,0 +1,188 @@
+/**
+ * GSH_701 Multi-Device Bluetooth Receiver - USB Dongle
+ *
+ * This firmware connects to up to 4 GSH_ECG devices simultaneously
+ * and forwards the received HRV data to PC via USB CDC.
+ *
+ * Hardware: ESP32-S3
+ * Protocol: GSH_701 Bluetooth Communication Specification
+ */
+
+#include <Arduino.h>
+#include <BLEDevice.h>
+
+#include "gsh701_ble_client.h"
+#include "mac_whitelist.h"
+#include "usb_cdc_output.h"
+
+// ============================================================================
+// Configuration
+// ============================================================================
+#define USB_BAUDRATE 115200
+#define STATUS_LED_PIN -1 // Set to LED GPIO if available, -1 to disable
+
+// Status print interval
+#define STATUS_INTERVAL_MS 5000
+
+// ============================================================================
+// Global Variables
+// ============================================================================
+static uint32_t last_status_print = 0;
+static uint32_t packet_counts[MAX_GSH_DEVICES] = {0};
+
+// ============================================================================
+// Forward Declarations
+// ============================================================================
+void printStatus();
+void updateLed();
+
+// ============================================================================
+// BLE Data Callback - forwards data to USB
+// ============================================================================
+void onBleDataReceived(uint8_t device_index, uint8_t *data, size_t len) {
+  // Forward to USB CDC
+  usb_cdc_send_data_packet(device_index, data, len);
+
+  // Count packets for statistics
+  packet_counts[device_index]++;
+}
+
+// ============================================================================
+// Setup
+// ============================================================================
+void setup() {
+  // Use a fixed baud for initial debug to bypass any init issues
+  Serial.begin(115200);
+
+  // Give terminal some time to settle
+  for (int i = 0; i < 5; i++) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\n[DEBUG] ESP32-S3 Application Started");
+
+  // Initialize USB CDC (will use 115200 from USB_BAUDRATE)
+  usb_cdc_init(USB_BAUDRATE);
+
+  Serial.println("\n========================================");
+  Serial.println("  GSH_701 Multi-Device BLE Receiver");
+  Serial.println("  Max devices: 4");
+  Serial.println("========================================\n");
+
+  // Initialize status LED if configured
+  if (STATUS_LED_PIN >= 0) {
+    pinMode(STATUS_LED_PIN, OUTPUT);
+    digitalWrite(STATUS_LED_PIN, LOW);
+  }
+
+  // Initialize MAC whitelist from NVS (before BLE so filter is ready)
+  whitelist_init();
+
+  // Initialize BLE system
+  gsh_ble_init();
+
+  // Set callback for received data
+  gsh_ble_set_data_callback(onBleDataReceived);
+
+  // Start scanning for GSH_ECG devices
+  gsh_ble_start_scan();
+
+  Serial.println("[MAIN] Setup complete, scanning for GSH_ECG devices...\n");
+}
+
+// ============================================================================
+// Main Loop
+// ============================================================================
+void loop() {
+  // Process BLE connections and data
+  gsh_process_all();
+
+  // Process USB output
+  usb_cdc_process();
+
+  // Print status periodically
+  uint32_t now = millis();
+  if (now - last_status_print >= STATUS_INTERVAL_MS) {
+    last_status_print = now;
+    printStatus();
+  }
+
+  // Update LED based on connection status
+  updateLed();
+
+  // Small delay to prevent WDT reset
+  delay(1);
+}
+
+// ============================================================================
+// Status Display
+// ============================================================================
+void printStatus() {
+  Serial.println("\n--- Device Status ---");
+
+  uint8_t connected = gsh_get_connected_count();
+  Serial.printf("Connected devices: %d / %d\n", connected, MAX_GSH_DEVICES);
+
+  for (int i = 0; i < MAX_GSH_DEVICES; i++) {
+    gsh_device_state_t state = gsh_get_device_state(i);
+    if (state != GSH_STATE_DISCONNECTED) {
+      Serial.printf("  Device %d: %s", i, gsh_state_to_string(state));
+
+      if (state == GSH_STATE_STREAMING) {
+        Serial.printf(" (packets: %lu)", packet_counts[i]);
+      }
+
+      int8_t batt = gsh_get_battery_level(i);
+      if (batt >= 0) {
+        Serial.printf(" [Batt: %d%%]", batt);
+      }
+
+      uint8_t chg = gsh_get_charging_status(i);
+      if (chg == 1) {
+        Serial.printf(" [Charging]");
+      } else if (chg == 2) {
+        Serial.printf(" [Battery]");
+      }
+
+      int8_t rssi = gsh_get_rssi(i);
+      if (rssi != 0) {
+        Serial.printf(" [RSSI: %d]", rssi);
+      }
+
+      uint8_t mac[6];
+      if (gsh_get_mac_address(i, mac)) {
+        Serial.printf(" [%02X:%02X:%02X:%02X:%02X:%02X]",
+                       mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+      }
+      Serial.println();
+
+      // Send device info to PC via USB CDC
+      if (state >= GSH_STATE_STREAMING) {
+        usb_cdc_send_device_info(i, batt, mac, chg, rssi);
+      }
+    }
+  }
+
+  Serial.println("---------------------\n");
+}
+
+// ============================================================================
+// LED Control
+// ============================================================================
+void updateLed() {
+  if (STATUS_LED_PIN < 0)
+    return;
+
+  uint8_t connected = gsh_get_connected_count();
+
+  if (connected == 0) {
+    // Slow blink when scanning
+    digitalWrite(STATUS_LED_PIN, (millis() / 500) % 2);
+  } else if (connected < MAX_GSH_DEVICES) {
+    // Fast blink when partially connected
+    digitalWrite(STATUS_LED_PIN, (millis() / 200) % 2);
+  } else {
+    // Solid on when all devices connected
+    digitalWrite(STATUS_LED_PIN, HIGH);
+  }
+}

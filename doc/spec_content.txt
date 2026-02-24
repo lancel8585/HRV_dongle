@@ -1,0 +1,95 @@
+高登智慧科技股份有限公司
+PRJ-XXXX-XXX-XXX
+第0頁共3 頁
+文
+件
+名
+稱藍牙通訊規格書
+文
+件
+編號
+版
+本A0
+產
+品
+名
+稱情緒壓力感測器
+產
+品
+型
+號GSH_701
+發
+行
+日
+期2017/06/09
+頁
+碼第0 頁共3 頁
+產品外觀圖：
+客戶簽章:
+核
+准
+審
+核
+製
+表
+Kirby Huang
+高登智慧科技股份有限公司
+PRJ-XXXX-XXX-XXX
+第1頁共3 頁
+1.描述
+此文件記錄GSH_701 藍牙的設定/ 相關指令/ 設定流程.
+2.藍芽相關
+2.1 藍牙裝置名稱
+Device name : GSH_ECG
+(廣播封包內帶有MAC Address.)
+2.2 藍牙Service UUID
+Service UUID : 0xFFF0
+Notify : 0xFFF3 (會從這邊主動往APP 丟資料20~60ms 丟一次)
+Write : 0xFFF4(下指令給藍牙模組用)
+Notify : 0xFFF5(補傳封包/回覆指令用)
+Notify 封包結構:
+封包長度固定20bytes.
+Byte0 bit7
+1=sensor on / 0=sensor off.
+Bit0~4 封包counter. 0x00~0x1F
+(bit5/6 保留)
+Byte1 Code 目前僅有0x80
+Byte2~19 皆為raw data.
+若是Data Rate 為256Hz/512Hz 的16bit 模式,
+Byte2 = H byte, Byte3 = L Byte,.....,Byte18 = H byte, Byte19 = L byte.
+一個封包會有9 筆16bit 的資料.
+256Hz/512Hz 8bit
+Byte2 開始每一個byte 代表一筆8 bit Data. 一個封包會有18 筆資料.
+高登智慧科技股份有限公司
+PRJ-XXXX-XXX-XXX
+第2頁共3 頁
+2.3 藍芽指令
+Note : 僅”設定密碼”及”設定Data rate”錯誤時才會回覆失敗.
+補充:
+1. 補傳的封包會從0xFFF5 傳送, 僅會回傳一次.
+2. 封包fifo 目前僅有32 個buffer, 0x00~0x1F.
+3. 有下0xA1,0xC0 指令斷線, 模組會立即進入睡眠.
+4. 若沒下0xA1,0xC0 便斷線, 模組會回到廣播狀態等60S.
+5. Mac address 可由Advertisement data 裡面的Manufacturer Data 取得.
+EX: <59007052EAE551D1> Mac = 70:52:EA:E5:51:D1
+密碼= 0x70+0x52+0xEA+0xE5+0x51+0xD1 = 0x03B3
+H_byte = 0x03 ; L_byte = 0xB3.
+6. 需要在連線完成後10S 內傳送密碼, 否則模組會強制斷線進入睡眠.
+7. 系統開機不用下指令就預設Data Rate 為256Hz/8bit.
+8. Device 會從0xFFF5 回覆指令, 若沒有開啟Notify 便會收不到.
+高登智慧科技股份有限公司
+PRJ-XXXX-XXX-XXX
+第3頁共3 頁
+2.4 連線設定流程
+(1) 開機連線後, 先開啟0xFFF5 Notify.
+(2) 10 秒內發送密碼指令, 並確定有收到回覆指令.
+(3) 下設定Data Rate 的指令, 確定有收到回覆指令.
+(4) 開啟0xFFF3 Notify 開始接收raw data.
+Note:務必確認密碼及Data rate 都有收到成功的回覆, 才能開啟0xFFF3 Notify.
+2.5 韌體更新DFU(OTA)
+(1) 指令輸入0x5A 之後會以GSH_OTA 名稱重新Advertising.
+(2) 若60S 內沒有連線, 會進入睡眠.
+(3) 使用Dual bank, 任何異常導致傳輸失敗, 系統會回到更新前的韌體.
+功能完全同更新前的狀態, 可照常使用, 亦可重新進入OTA.
+(4) 若想強制離開OTA, 插上USB 便會reset 且進入充電狀態.
+(5) 使用SDK11 的DFU, 因此firmware 檔案需使用nrfutil.exe 做成.zip 才能傳輸.
