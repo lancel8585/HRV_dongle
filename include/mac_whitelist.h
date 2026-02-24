@@ -18,6 +18,12 @@ bool whitelist_get_mac(uint8_t slot, uint8_t mac[6]);
 // Returns true if mac matches any slot or if that slot is FF:FF:FF:FF:FF:FF (wildcard).
 bool whitelist_is_allowed(const uint8_t mac[6]);
 
+// Check if a MAC address exactly matches any non-wildcard slot.
+bool whitelist_is_exact_match(const uint8_t mac[6]);
+
+// Return the number of non-wildcard (bound) slots.
+uint8_t whitelist_get_bound_count();
+
 // Reset all slots to FF:FF:FF:FF:FF:FF (wildcard) and write to NVS.
 void whitelist_reset_all();
 

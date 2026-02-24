@@ -149,6 +149,33 @@ class GshAdvertisedDeviceCallbacks : public BLEAdvertisedDeviceCallbacks {
             return;
           }
 
+          // Bind-priority: if this MAC is only allowed by wildcard slots,
+          // check whether the wildcard quota is already full.
+          if (!whitelist_is_exact_match(mac_be)) {
+            uint8_t bound_count = whitelist_get_bound_count();
+            uint8_t max_wildcard = MAX_GSH_DEVICES - bound_count;
+
+            // Count how many currently occupied device slots are wildcard devices
+            uint8_t wildcard_occupied = 0;
+            for (int j = 0; j < MAX_GSH_DEVICES; j++) {
+              if (gsh_devices[j].state != GSH_STATE_DISCONNECTED
+                  && gsh_devices[j].address != nullptr) {
+                const uint8_t *nat = *gsh_devices[j].address->getNative();
+                uint8_t dev_mac[6];
+                for (int k = 0; k < 6; k++) dev_mac[k] = nat[5 - k];
+                if (!whitelist_is_exact_match(dev_mac)) {
+                  wildcard_occupied++;
+                }
+              }
+            }
+
+            if (wildcard_occupied >= max_wildcard) {
+              GSH_LOG("[SCAN] Skipped %s (wildcard full %d/%d)\n",
+                      addr.toString().c_str(), wildcard_occupied, max_wildcard);
+              return;
+            }
+          }
+
           GSH_LOG("[SCAN] Found GSH_ECG device: %s (RSSI: %d)\n",
                   addr.toString().c_str(), advertisedDevice.getRSSI());
 

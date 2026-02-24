@@ -62,6 +62,26 @@ bool whitelist_is_allowed(const uint8_t mac[6]) {
   return false;
 }
 
+bool whitelist_is_exact_match(const uint8_t mac[6]) {
+  for (int i = 0; i < WHITELIST_MAX_SLOTS; i++) {
+    // Skip wildcard slots
+    if (memcmp(whitelist_macs[i], WILDCARD_MAC, 6) == 0)
+      continue;
+    if (memcmp(whitelist_macs[i], mac, 6) == 0)
+      return true;
+  }
+  return false;
+}
+
+uint8_t whitelist_get_bound_count() {
+  uint8_t count = 0;
+  for (int i = 0; i < WHITELIST_MAX_SLOTS; i++) {
+    if (memcmp(whitelist_macs[i], WILDCARD_MAC, 6) != 0)
+      count++;
+  }
+  return count;
+}
+
 void whitelist_reset_all() {
   prefs.begin(NVS_NAMESPACE, false); // read-write
   for (int i = 0; i < WHITELIST_MAX_SLOTS; i++) {
