@@ -37,8 +37,10 @@
 #define GSH_CMD_DISCONNECT 0xA1   // + 0xC0 to sleep
 #define GSH_CMD_ENTER_SLEEP 0xC0  // Second byte for sleep command
 #define GSH_CMD_ENTER_OTA 0x5A    // Enter OTA/DFU mode
-#define GSH_CMD_256HZ_8BIT 0xF1   // Set 256Hz 8-bit sample rate (+ 0x80 0x08)
+#define GSH_CMD_256HZ_8BIT  0xF1  // Set 256Hz 8-bit sample rate  (+ 0x80 0x08)
 #define GSH_CMD_256HZ_16BIT 0xF3  // Set 256Hz 16-bit sample rate (+ 0x80 0x10)
+#define GSH_CMD_512HZ_8BIT  0xFA  // Set 512Hz 8-bit sample rate  (+ 0xFF 0x08)
+#define GSH_CMD_512HZ_16BIT 0xFC  // Set 512Hz 16-bit sample rate (+ 0xFF 0x10)
 
 // Device state machine
 typedef enum {

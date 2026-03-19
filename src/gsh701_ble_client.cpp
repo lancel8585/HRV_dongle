@@ -608,7 +608,7 @@ void gsh_process_all() {
           if ((now - device->last_retry_time) >= GSH_RETRY_INTERVAL_MS) {
             device->last_retry_time = now;
             device->datarate_retry_count++;
-            sendDataRate(device, GSH_CMD_256HZ_8BIT);
+            sendDataRate(device, GSH_CMD_512HZ_16BIT);
           }
         } else {
           GSH_LOG("[GSH%d] Data rate setting timeout\n", i);
@@ -844,6 +844,14 @@ static bool sendDataRate(gsh_device_t *device, uint8_t rate) {
       break;
     case GSH_CMD_256HZ_16BIT:
       cmd[1] = 0x80;
+      cmd[2] = 0x10;
+      break;
+    case GSH_CMD_512HZ_8BIT:
+      cmd[1] = 0xFF;
+      cmd[2] = 0x08;
+      break;
+    case GSH_CMD_512HZ_16BIT:
+      cmd[1] = 0xFF;
       cmd[2] = 0x10;
       break;
     default:
