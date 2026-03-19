@@ -10,6 +10,7 @@
 
 #include <Arduino.h>
 #include <BLEDevice.h>
+#include <Adafruit_NeoPixel.h>
 
 #include "gsh701_ble_client.h"
 #include "mac_whitelist.h"
@@ -19,7 +20,13 @@
 // Configuration
 // ============================================================================
 #define USB_BAUDRATE 115200
-#define STATUS_LED_PIN -1 // Set to LED GPIO if available, -1 to disable
+
+// RGB LED (WS2812) on GPIO48
+#define LED_PIN       48
+#define LED_COUNT     1
+#define LED_BLINK_MS  1000  // USB disconnected blink period
+
+static Adafruit_NeoPixel led(LED_COUNT, LED_PIN, NEO_GRB + NEO_KHZ800);
 
 // Status print interval
 #define STATUS_INTERVAL_MS 5000
@@ -69,11 +76,11 @@ void setup() {
   Serial.println("  Max devices: 4");
   Serial.println("========================================\n");
 
-  // Initialize status LED if configured
-  if (STATUS_LED_PIN >= 0) {
-    pinMode(STATUS_LED_PIN, OUTPUT);
-    digitalWrite(STATUS_LED_PIN, LOW);
-  }
+  // Initialize RGB LED
+  led.begin();
+  led.setBrightness(50);
+  led.clear();
+  led.show();
 
   // Initialize MAC whitelist from NVS (before BLE so filter is ready)
   whitelist_init();
@@ -168,21 +175,27 @@ void printStatus() {
 
 // ============================================================================
 // LED Control
+// Color  = BLE state:  White=scanning/no conn, Blue=partial conn, Green=all conn
+// Solid  = USB connected
+// Blink  = USB not connected (1s period)
 // ============================================================================
 void updateLed() {
-  if (STATUS_LED_PIN < 0)
-    return;
-
   uint8_t connected = gsh_get_connected_count();
+  bool usb_connected = usb_cdc_is_connected();
 
+  // Determine color from BLE state
+  uint32_t color;
   if (connected == 0) {
-    // Slow blink when scanning
-    digitalWrite(STATUS_LED_PIN, (millis() / 500) % 2);
+    color = led.Color(80, 80, 80);        // White
   } else if (connected < MAX_GSH_DEVICES) {
-    // Fast blink when partially connected
-    digitalWrite(STATUS_LED_PIN, (millis() / 200) % 2);
+    color = led.Color(0, 0, 255);         // Blue
   } else {
-    // Solid on when all devices connected
-    digitalWrite(STATUS_LED_PIN, HIGH);
+    color = led.Color(0, 255, 0);         // Green
   }
+
+  // Blink when USB not connected, solid when connected
+  bool lit = usb_connected || ((millis() / LED_BLINK_MS) % 2 == 0);
+
+  led.setPixelColor(0, lit ? color : 0);
+  led.show();
 }
