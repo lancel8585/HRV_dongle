@@ -29,6 +29,61 @@ static bool is_scanning = false;
 static bool has_pending_devices =
     false; // Flag: devices found during scan, connect after scan ends
 
+// Blacklist: devices that connected but had no GSH service (e.g. GSH288)
+#define GSH_BLACKLIST_SIZE 8
+#define GSH_BLACKLIST_TIMEOUT_MS (5 * 60 * 1000) // 5 minutes
+
+static struct {
+  uint8_t mac[6];
+  uint32_t fail_time;
+  bool active;
+} ble_blacklist[GSH_BLACKLIST_SIZE];
+
+static void blacklist_add(const uint8_t *mac) {
+  uint32_t now = millis();
+  // Update timestamp if already listed
+  for (int i = 0; i < GSH_BLACKLIST_SIZE; i++) {
+    if (ble_blacklist[i].active && memcmp(ble_blacklist[i].mac, mac, 6) == 0) {
+      ble_blacklist[i].fail_time = now;
+      return;
+    }
+  }
+  // Find free or expired slot
+  int slot = -1;
+  for (int i = 0; i < GSH_BLACKLIST_SIZE; i++) {
+    if (!ble_blacklist[i].active ||
+        (now - ble_blacklist[i].fail_time) > GSH_BLACKLIST_TIMEOUT_MS) {
+      slot = i;
+      break;
+    }
+  }
+  // Evict oldest if all slots full
+  if (slot < 0) {
+    slot = 0;
+    for (int i = 1; i < GSH_BLACKLIST_SIZE; i++) {
+      if (ble_blacklist[i].fail_time < ble_blacklist[slot].fail_time)
+        slot = i;
+    }
+  }
+  memcpy(ble_blacklist[slot].mac, mac, 6);
+  ble_blacklist[slot].fail_time = now;
+  ble_blacklist[slot].active = true;
+  GSH_LOG("[BL] Blacklisted: %02X:%02X:%02X:%02X:%02X:%02X (5min)\n",
+          mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+}
+
+static bool blacklist_check(const uint8_t *mac) {
+  uint32_t now = millis();
+  for (int i = 0; i < GSH_BLACKLIST_SIZE; i++) {
+    if (ble_blacklist[i].active && memcmp(ble_blacklist[i].mac, mac, 6) == 0) {
+      if ((now - ble_blacklist[i].fail_time) < GSH_BLACKLIST_TIMEOUT_MS)
+        return true; // Still blacklisted
+      ble_blacklist[i].active = false; // Expired
+    }
+  }
+  return false;
+}
+
 // Forward declarations
 static void gsh_ble_scan_on_complete(BLEScanResults foundDevices);
 static void gsh_disconnect_device_internal(uint8_t index, bool send_sleep);
@@ -116,6 +171,13 @@ class GshAdvertisedDeviceCallbacks : public BLEAdvertisedDeviceCallbacks {
     // UUID alone is not enough — other devices (e.g. RINGOAL_HOME) also use
     // FFF0. Require GSH name prefix or GSHCARE manufacturer data (0x59).
     if (matchName || matchManuf) {
+
+      // Check blacklist (devices that connected but had no GSH service)
+      if (blacklist_check(*advertisedDevice.getAddress().getNative())) {
+        GSH_LOG("[SCAN] Skipped %s (blacklisted)\n",
+                advertisedDevice.getAddress().toString().c_str());
+        return;
+      }
 
       // Check if we have room for more devices and not already connected
       uint8_t connected = gsh_get_connected_count();
@@ -375,6 +437,7 @@ bool gsh_connect_device(uint8_t index, BLEAddress *address) {
           pService->getCharacteristic(BLEUUID(GSH_NOTIFY_RESP_UUID_LEGACY));
     } else {
       GSH_LOG("[GSH%d] No GSH service found (tried FFF0 and FFE0)\n", index);
+      blacklist_add(*address->getNative());
       device->client->disconnect();
       changeState(device, GSH_STATE_DISCONNECTED);
       return false;
