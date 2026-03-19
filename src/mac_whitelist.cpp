@@ -50,24 +50,41 @@ bool whitelist_get_mac(uint8_t slot, uint8_t mac[6]) {
   return true;
 }
 
+// Build the byte-reversed version of a MAC address.
+static void reverse_mac(const uint8_t in[6], uint8_t out[6]) {
+  for (int i = 0; i < 6; i++)
+    out[i] = in[5 - i];
+}
+
 bool whitelist_is_allowed(const uint8_t mac[6]) {
+  uint8_t mac_rev[6];
+  reverse_mac(mac, mac_rev);
+
   for (int i = 0; i < WHITELIST_MAX_SLOTS; i++) {
     // Wildcard slot allows anything
     if (memcmp(whitelist_macs[i], WILDCARD_MAC, 6) == 0)
       return true;
-    // Exact match
+    // Match in either byte order (tolerates big-endian or little-endian stored MAC)
     if (memcmp(whitelist_macs[i], mac, 6) == 0)
+      return true;
+    if (memcmp(whitelist_macs[i], mac_rev, 6) == 0)
       return true;
   }
   return false;
 }
 
 bool whitelist_is_exact_match(const uint8_t mac[6]) {
+  uint8_t mac_rev[6];
+  reverse_mac(mac, mac_rev);
+
   for (int i = 0; i < WHITELIST_MAX_SLOTS; i++) {
     // Skip wildcard slots
     if (memcmp(whitelist_macs[i], WILDCARD_MAC, 6) == 0)
       continue;
+    // Match in either byte order
     if (memcmp(whitelist_macs[i], mac, 6) == 0)
+      return true;
+    if (memcmp(whitelist_macs[i], mac_rev, 6) == 0)
       return true;
   }
   return false;

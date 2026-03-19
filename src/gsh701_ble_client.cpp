@@ -142,120 +142,137 @@ public:
 // ============================================================================
 class GshAdvertisedDeviceCallbacks : public BLEAdvertisedDeviceCallbacks {
   void onResult(BLEAdvertisedDevice advertisedDevice) override {
-    // Check if device name matches GSH_ECG
     std::string devName =
         advertisedDevice.haveName() ? advertisedDevice.getName() : "N/A";
-    GSH_LOG("[SCAN] Found: %s (%s) RSSI: %d, SRV: %s\n", devName.c_str(),
-            advertisedDevice.getAddress().toString().c_str(),
-            advertisedDevice.getRSSI(),
-            advertisedDevice.haveServiceUUID()
-                ? advertisedDevice.getServiceUUID().toString().c_str()
-                : "None");
+    std::string addrStr = advertisedDevice.getAddress().toString();
 
     bool matchName = advertisedDevice.haveName() &&
                      advertisedDevice.getName().find(GSH_DEVICE_NAME_PREFIX) !=
                          std::string::npos;
-    // V605 firmware advertises manufacturer data with company ID 0x59
-    // (GSHCARE). The advertising packet is too large for the device name to
-    // fit, so we match by manufacturer data instead.
+
     bool matchManuf = false;
     if (advertisedDevice.haveManufacturerData()) {
       std::string mfData = advertisedDevice.getManufacturerData();
-      // Company ID is first 2 bytes (little-endian): 0x59 0x00
+      // Company ID is first 2 bytes (little-endian): 0x59 0x00 = GSHCARE
       if (mfData.length() >= 2 && (uint8_t)mfData[0] == 0x59 &&
           (uint8_t)mfData[1] == 0x00) {
         matchManuf = true;
       }
     }
 
-    // UUID alone is not enough — other devices (e.g. RINGOAL_HOME) also use
-    // FFF0. Require GSH name prefix or GSHCARE manufacturer data (0x59).
-    if (matchName || matchManuf) {
+    if (!matchName && !matchManuf) {
+      // Not a GSH candidate — log briefly at verbose level only
+      GSH_LOG("[SCAN] Ignore: %s (%s) RSSI:%d\n",
+              devName.c_str(), addrStr.c_str(), advertisedDevice.getRSSI());
+      return;
+    }
 
-      // Check blacklist (devices that connected but had no GSH service)
-      if (blacklist_check(*advertisedDevice.getAddress().getNative())) {
-        GSH_LOG("[SCAN] Skipped %s (blacklisted)\n",
-                advertisedDevice.getAddress().toString().c_str());
-        return;
-      }
+    // ---- Device is a GSH candidate (name or GSHCARE manuf matched) ----
+    GSH_LOG("[SCAN] >> GSH candidate: \"%s\" (%s) RSSI:%d match=%s%s\n",
+            devName.c_str(), addrStr.c_str(), advertisedDevice.getRSSI(),
+            matchName ? "name " : "", matchManuf ? "manuf(0x59)" : "");
 
-      // Check if we have room for more devices and not already connected
-      uint8_t connected = gsh_get_connected_count();
-      if (connected < MAX_GSH_DEVICES) {
-        // Check if this device is already known
-        BLEAddress addr = advertisedDevice.getAddress();
-        bool already_known = false;
-        int free_slot = -1;
-
-        for (int i = 0; i < MAX_GSH_DEVICES; i++) {
-          if (gsh_devices[i].state != GSH_STATE_DISCONNECTED) {
-            if (gsh_devices[i].address && *gsh_devices[i].address == addr) {
-              already_known = true;
-              break;
-            }
-          } else if (free_slot < 0) {
-            free_slot = i;
-          }
-        }
-
-        if (!already_known && free_slot >= 0) {
-          // Whitelist check: extract big-endian MAC and verify
-          const uint8_t *native = *addr.getNative();
-          uint8_t mac_be[6];
-          for (int j = 0; j < 6; j++) {
-            mac_be[j] = native[5 - j];
-          }
-          if (!whitelist_is_allowed(mac_be)) {
-            GSH_LOG("[SCAN] Skipped %s (not in whitelist)\n",
-                    addr.toString().c_str());
-            return;
-          }
-
-          // Bind-priority: if this MAC is only allowed by wildcard slots,
-          // check whether the wildcard quota is already full.
-          if (!whitelist_is_exact_match(mac_be)) {
-            uint8_t bound_count = whitelist_get_bound_count();
-            uint8_t max_wildcard = MAX_GSH_DEVICES - bound_count;
-
-            // Count how many currently occupied device slots are wildcard devices
-            uint8_t wildcard_occupied = 0;
-            for (int j = 0; j < MAX_GSH_DEVICES; j++) {
-              if (gsh_devices[j].state != GSH_STATE_DISCONNECTED
-                  && gsh_devices[j].address != nullptr) {
-                const uint8_t *nat = *gsh_devices[j].address->getNative();
-                uint8_t dev_mac[6];
-                for (int k = 0; k < 6; k++) dev_mac[k] = nat[5 - k];
-                if (!whitelist_is_exact_match(dev_mac)) {
-                  wildcard_occupied++;
-                }
-              }
-            }
-
-            if (wildcard_occupied >= max_wildcard) {
-              GSH_LOG("[SCAN] Skipped %s (wildcard full %d/%d)\n",
-                      addr.toString().c_str(), wildcard_occupied, max_wildcard);
-              return;
-            }
-          }
-
-          GSH_LOG("[SCAN] Found GSH_ECG device: %s (RSSI: %d)\n",
-                  addr.toString().c_str(), advertisedDevice.getRSSI());
-
-          // Store address, address type, and RSSI from scan result
-          gsh_devices[free_slot].address = new BLEAddress(addr);
-          gsh_devices[free_slot].addr_type =
-              advertisedDevice.getAddressType();
-          gsh_devices[free_slot].rssi = (int8_t)advertisedDevice.getRSSI();
-          changeState(&gsh_devices[free_slot], GSH_STATE_CONNECTING);
-          has_pending_devices = true;
-
-          // Stop scan early so we can connect sooner
-          pBLEScan->stop();
-          pBLEScan->clearResults();
-          is_scanning = false;
-        }
+    // Log manufacturer data MAC if available (embedded in adv packet)
+    if (matchManuf && advertisedDevice.haveManufacturerData()) {
+      std::string mfData = advertisedDevice.getManufacturerData();
+      if (mfData.length() >= 8) {
+        // Bytes 2..7 are the MAC in native (LSB-first) order
+        const uint8_t *mb = (const uint8_t *)mfData.c_str() + 2;
+        GSH_LOG("[SCAN]    manuf MAC (native): %02X:%02X:%02X:%02X:%02X:%02X\n",
+                mb[0], mb[1], mb[2], mb[3], mb[4], mb[5]);
+        GSH_LOG("[SCAN]    manuf MAC (big-end): %02X:%02X:%02X:%02X:%02X:%02X\n",
+                mb[5], mb[4], mb[3], mb[2], mb[1], mb[0]);
       }
     }
+
+    // Check blacklist
+    if (blacklist_check(*advertisedDevice.getAddress().getNative())) {
+      GSH_LOG("[SCAN]    SKIP: blacklisted\n");
+      return;
+    }
+
+    // Check slot availability
+    uint8_t connected = gsh_get_connected_count();
+    if (connected >= MAX_GSH_DEVICES) {
+      GSH_LOG("[SCAN]    SKIP: all %d slots occupied\n", MAX_GSH_DEVICES);
+      return;
+    }
+
+    BLEAddress addr = advertisedDevice.getAddress();
+    bool already_known = false;
+    int free_slot = -1;
+
+    for (int i = 0; i < MAX_GSH_DEVICES; i++) {
+      if (gsh_devices[i].state != GSH_STATE_DISCONNECTED) {
+        if (gsh_devices[i].address && *gsh_devices[i].address == addr) {
+          already_known = true;
+          break;
+        }
+      } else if (free_slot < 0) {
+        free_slot = i;
+      }
+    }
+
+    if (already_known) {
+      GSH_LOG("[SCAN]    SKIP: already tracked\n");
+      return;
+    }
+    if (free_slot < 0) {
+      GSH_LOG("[SCAN]    SKIP: no free device slot\n");
+      return;
+    }
+
+    // Whitelist check: getNative() on ESP32 already returns big-endian (MSB first),
+    // same byte order as toString(). Compare directly — no reversal needed.
+    const uint8_t *native = *addr.getNative();
+    GSH_LOG("[SCAN]    whitelist check MAC: %02X:%02X:%02X:%02X:%02X:%02X\n",
+            native[0], native[1], native[2], native[3], native[4], native[5]);
+
+    if (!whitelist_is_allowed(native)) {
+      GSH_LOG("[SCAN]    SKIP: not in whitelist\n");
+      return;
+    }
+
+    // Wildcard quota check
+    bool exact = whitelist_is_exact_match(native);
+    if (!exact) {
+      uint8_t bound_count = whitelist_get_bound_count();
+      uint8_t max_wildcard = MAX_GSH_DEVICES - bound_count;
+      uint8_t wildcard_occupied = 0;
+
+      for (int j = 0; j < MAX_GSH_DEVICES; j++) {
+        if (gsh_devices[j].state != GSH_STATE_DISCONNECTED &&
+            gsh_devices[j].address != nullptr) {
+          const uint8_t *nat = *gsh_devices[j].address->getNative();
+          if (!whitelist_is_exact_match(nat)) {
+            wildcard_occupied++;
+          }
+        }
+      }
+
+      GSH_LOG("[SCAN]    wildcard quota: %d/%d used (bound=%d)\n",
+              wildcard_occupied, max_wildcard, bound_count);
+
+      if (wildcard_occupied >= max_wildcard) {
+        GSH_LOG("[SCAN]    SKIP: wildcard quota full\n");
+        return;
+      }
+    } else {
+      GSH_LOG("[SCAN]    exact whitelist match\n");
+    }
+
+    GSH_LOG("[SCAN]    ACCEPT -> slot %d\n", free_slot);
+
+    gsh_devices[free_slot].address = new BLEAddress(addr);
+    gsh_devices[free_slot].addr_type = advertisedDevice.getAddressType();
+    gsh_devices[free_slot].rssi = (int8_t)advertisedDevice.getRSSI();
+    changeState(&gsh_devices[free_slot], GSH_STATE_CONNECTING);
+    has_pending_devices = true;
+
+    // Stop scan early so we can connect sooner
+    pBLEScan->stop();
+    pBLEScan->clearResults();
+    is_scanning = false;
   }
 };
 
@@ -334,6 +351,17 @@ void gsh_ble_start_scan() {
       pBLEScan->setInterval(40);
       pBLEScan->setWindow(40);
       scan_secs = 5;
+    }
+    // Print whitelist state at scan start for diagnostics
+    GSH_LOG("[SCAN] Whitelist at scan start:\n");
+    for (int i = 0; i < WHITELIST_MAX_SLOTS; i++) {
+      uint8_t wl_mac[6];
+      whitelist_get_mac(i, wl_mac);
+      GSH_LOG("[SCAN]   slot%d: %02X:%02X:%02X:%02X:%02X:%02X%s\n", i,
+              wl_mac[0], wl_mac[1], wl_mac[2], wl_mac[3], wl_mac[4], wl_mac[5],
+              (wl_mac[0]==0xFF && wl_mac[1]==0xFF && wl_mac[2]==0xFF &&
+               wl_mac[3]==0xFF && wl_mac[4]==0xFF && wl_mac[5]==0xFF)
+                  ? " (wildcard)" : " (bound)");
     }
     GSH_LOG("[SCAN] Starting BLE scan (%ds, %s duty)...\n",
             scan_secs, connected > 0 ? "low" : "full");
@@ -437,7 +465,14 @@ bool gsh_connect_device(uint8_t index, BLEAddress *address) {
           pService->getCharacteristic(BLEUUID(GSH_NOTIFY_RESP_UUID_LEGACY));
     } else {
       GSH_LOG("[GSH%d] No GSH service found (tried FFF0 and FFE0)\n", index);
-      blacklist_add(*address->getNative());
+      // Don't blacklist devices that are explicitly in the whitelist —
+      // service discovery can fail transiently on first connect.
+      // Only blacklist unknown devices (those matching via wildcard).
+      if (!whitelist_is_exact_match(*address->getNative())) {
+        blacklist_add(*address->getNative());
+      } else {
+        GSH_LOG("[GSH%d] Whitelist-bound device, skip blacklist\n", index);
+      }
       device->client->disconnect();
       changeState(device, GSH_STATE_DISCONNECTED);
       return false;
@@ -837,12 +872,9 @@ bool gsh_get_mac_address(uint8_t index, uint8_t *out_mac) {
     return false;
   if (gsh_devices[index].address == nullptr)
     return false;
-  // BLEAddress stores native bytes (6 bytes)
+  // ESP32 BLE getNative() already returns big-endian (MSB first) — copy directly
   const uint8_t *native = *gsh_devices[index].address->getNative();
-  // ESP32 BLE stores in reverse order; output as big-endian (MSB first)
-  for (int i = 0; i < 6; i++) {
-    out_mac[i] = native[5 - i];
-  }
+  memcpy(out_mac, native, 6);
   return true;
 }
 
