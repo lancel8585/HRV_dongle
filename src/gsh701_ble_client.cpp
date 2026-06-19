@@ -1,5 +1,9 @@
 #include "gsh701_ble_client.h"
 #include "mac_whitelist.h"
+#include "esp_gap_ble_api.h"
+
+static_assert(WHITELIST_MAX_SLOTS == MAX_GSH_DEVICES,
+              "Whitelist slots must map one-to-one with GSH device slots");
 
 // ============================================================================
 // Debug configuration
@@ -18,6 +22,10 @@
 #define GSH_MAX_AUTH_RETRIES 10
 #define GSH_MAX_DATARATE_RETRIES 5
 #define GSH_RETRY_INTERVAL_MS 1000
+#define GSH_CONN_MIN_INTERVAL 12 // 15ms (1.25ms units)
+#define GSH_CONN_MAX_INTERVAL 24 // 30ms
+#define GSH_CONN_LATENCY 0
+#define GSH_CONN_TIMEOUT 600 // 6s (10ms units)
 
 // ============================================================================
 // Static variables
@@ -90,6 +98,9 @@ static void gsh_disconnect_device_internal(uint8_t index, bool send_sleep);
 static uint16_t calculatePassword(BLEAddress *address);
 static bool sendPassword(gsh_device_t *device);
 static bool sendDataRate(gsh_device_t *device, uint8_t rate);
+static bool readBatteryLevel(gsh_device_t *device);
+static void configureBleTxPower();
+static void updateConnectionParams(gsh_device_t *device);
 static void changeState(gsh_device_t *device, gsh_device_state_t newState);
 
 // ============================================================================
@@ -117,9 +128,11 @@ public:
     }
 
     // Clear characteristic pointers (invalidated after disconnect)
+    device->whitelist_exact_match = false;
     device->charFFE1 = nullptr;
     device->charFFE2 = nullptr;
     device->charFFE3 = nullptr;
+    device->charBattery = nullptr;
 
     device->auth_success = false;
     device->datarate_success = false;
@@ -127,6 +140,7 @@ public:
     device->datarate_retry_count = 0;
     device->last_retry_time = 0;
     device->last_packet_time = 0;
+    device->battery_notify_enabled = false;
 
     // Only set disconnect_time if not already set by gsh_disconnect_device_internal
     if (device->disconnect_time == 0) {
@@ -208,7 +222,7 @@ class GshAdvertisedDeviceCallbacks : public BLEAdvertisedDeviceCallbacks {
           already_known = true;
           break;
         }
-      } else if (free_slot < 0) {
+      } else if (free_slot < 0 && whitelist_is_wildcard_slot(i)) {
         free_slot = i;
       }
     }
@@ -217,11 +231,6 @@ class GshAdvertisedDeviceCallbacks : public BLEAdvertisedDeviceCallbacks {
       GSH_LOG("[SCAN]    SKIP: already tracked\n");
       return;
     }
-    if (free_slot < 0) {
-      GSH_LOG("[SCAN]    SKIP: no free device slot\n");
-      return;
-    }
-
     // Whitelist check: getNative() on ESP32 already returns big-endian (MSB first),
     // same byte order as toString(). Compare directly — no reversal needed.
     const uint8_t *native = *addr.getNative();
@@ -233,9 +242,20 @@ class GshAdvertisedDeviceCallbacks : public BLEAdvertisedDeviceCallbacks {
       return;
     }
 
-    // Wildcard quota check
-    bool exact = whitelist_is_exact_match(native);
-    if (!exact) {
+    int8_t exact_slot = whitelist_find_exact_slot(native);
+    int target_slot = exact_slot;
+    if (target_slot >= 0) {
+      if (gsh_devices[target_slot].state != GSH_STATE_DISCONNECTED) {
+        GSH_LOG("[SCAN]    SKIP: bound slot %d occupied\n", target_slot);
+        return;
+      }
+      GSH_LOG("[SCAN]    exact whitelist match -> slot %d\n", target_slot);
+    } else {
+      if (free_slot < 0) {
+        GSH_LOG("[SCAN]    SKIP: no free wildcard device slot\n");
+        return;
+      }
+
       uint8_t bound_count = whitelist_get_bound_count();
       uint8_t max_wildcard = MAX_GSH_DEVICES - bound_count;
       uint8_t wildcard_occupied = 0;
@@ -243,8 +263,7 @@ class GshAdvertisedDeviceCallbacks : public BLEAdvertisedDeviceCallbacks {
       for (int j = 0; j < MAX_GSH_DEVICES; j++) {
         if (gsh_devices[j].state != GSH_STATE_DISCONNECTED &&
             gsh_devices[j].address != nullptr) {
-          const uint8_t *nat = *gsh_devices[j].address->getNative();
-          if (!whitelist_is_exact_match(nat)) {
+          if (!gsh_devices[j].whitelist_exact_match) {
             wildcard_occupied++;
           }
         }
@@ -257,16 +276,16 @@ class GshAdvertisedDeviceCallbacks : public BLEAdvertisedDeviceCallbacks {
         GSH_LOG("[SCAN]    SKIP: wildcard quota full\n");
         return;
       }
-    } else {
-      GSH_LOG("[SCAN]    exact whitelist match\n");
+      target_slot = free_slot;
     }
 
-    GSH_LOG("[SCAN]    ACCEPT -> slot %d\n", free_slot);
+    GSH_LOG("[SCAN]    ACCEPT -> slot %d\n", target_slot);
 
-    gsh_devices[free_slot].address = new BLEAddress(addr);
-    gsh_devices[free_slot].addr_type = advertisedDevice.getAddressType();
-    gsh_devices[free_slot].rssi = (int8_t)advertisedDevice.getRSSI();
-    changeState(&gsh_devices[free_slot], GSH_STATE_CONNECTING);
+    gsh_devices[target_slot].address = new BLEAddress(addr);
+    gsh_devices[target_slot].addr_type = advertisedDevice.getAddressType();
+    gsh_devices[target_slot].whitelist_exact_match = exact_slot >= 0;
+    gsh_devices[target_slot].rssi = (int8_t)advertisedDevice.getRSSI();
+    changeState(&gsh_devices[target_slot], GSH_STATE_CONNECTING);
     has_pending_devices = true;
 
     // Stop scan early so we can connect sooner
@@ -288,6 +307,7 @@ void gsh_ble_init() {
 
   GSH_LOG("[BLE] Calling BLEDevice::init...\n");
   BLEDevice::init("HRV_Dongle");
+  configureBleTxPower();
   GSH_LOG("[BLE] BLEDevice::init complete\n");
 
   // Initialize device structures
@@ -296,12 +316,14 @@ void gsh_ble_init() {
     gsh_devices[i].index = i;
     gsh_devices[i].address = nullptr;
     gsh_devices[i].addr_type = BLE_ADDR_TYPE_PUBLIC;
+    gsh_devices[i].whitelist_exact_match = false;
     gsh_devices[i].fw_version = GSH_FW_UNKNOWN;
     gsh_devices[i].client = nullptr;
     gsh_devices[i].client_cb = new GshClientCallbacks(i);
     gsh_devices[i].charFFE1 = nullptr;
     gsh_devices[i].charFFE2 = nullptr;
     gsh_devices[i].charFFE3 = nullptr;
+    gsh_devices[i].charBattery = nullptr;
     gsh_devices[i].state = GSH_STATE_DISCONNECTED;
     gsh_devices[i].password = 0;
     gsh_devices[i].state_enter_time = 0;
@@ -315,6 +337,7 @@ void gsh_ble_init() {
     gsh_devices[i].disconnect_time = 0;
     gsh_devices[i].connect_fail_count = 0;
     gsh_devices[i].battery_level = -1;
+    gsh_devices[i].battery_notify_enabled = false;
     gsh_devices[i].charging_status = 0;
     gsh_devices[i].rssi = 0;
   }
@@ -438,6 +461,7 @@ bool gsh_connect_device(uint8_t index, BLEAddress *address) {
 
   // Connection succeeded, reset failure counter
   device->connect_fail_count = 0;
+  updateConnectionParams(device);
 
   // Try V605 service (0xFFF0) first, then legacy (0xFFE0)
   BLERemoteService *pService =
@@ -494,19 +518,40 @@ bool gsh_connect_device(uint8_t index, BLEAddress *address) {
   GSH_LOG("[GSH%d] Characteristics found (FFF3=%p FFF4=%p FFF5=%p)\n", index,
           device->charFFE1, device->charFFE2, device->charFFE3);
 
-  // Try to read battery level from standard Battery Service (0x180F)
+  // Try to find and read battery level from standard Battery Service (0x180F)
   device->battery_level = -1;
+  device->charBattery = nullptr;
+  device->battery_notify_enabled = false;
   BLERemoteService *pBattService =
       device->client->getService(BLEUUID(GSH_BATTERY_SERVICE_UUID));
   if (pBattService != nullptr) {
-    BLERemoteCharacteristic *pBattChar =
+    device->charBattery =
         pBattService->getCharacteristic(BLEUUID(GSH_BATTERY_LEVEL_UUID));
-    if (pBattChar != nullptr && pBattChar->canRead()) {
-      uint8_t battVal = pBattChar->readUInt8();
-      device->battery_level = (int8_t)battVal;
-      GSH_LOG("[GSH%d] Battery level: %d%%\n", index, battVal);
+    if (device->charBattery != nullptr) {
+      if (device->charBattery->canNotify()) {
+        device->charBattery->registerForNotify(
+            [index](BLERemoteCharacteristic *pChar, uint8_t *pData,
+                    size_t length, bool isNotify) {
+              if (length < 1 || pData[0] > 100) {
+                GSH_LOG("[GSH%d] Invalid battery notify len=%d value=0x%02X\n",
+                        index, length, length >= 1 ? pData[0] : 0);
+                return;
+              }
+              gsh_devices[index].battery_level = (int8_t)pData[0];
+              GSH_LOG("[GSH%d] Battery notify: %d%%\n", index, pData[0]);
+            });
+        device->battery_notify_enabled = true;
+        GSH_LOG("[GSH%d] Battery notify enabled\n", index);
+      }
+
+      if (device->charBattery->canRead()) {
+        readBatteryLevel(device);
+      } else if (!device->battery_notify_enabled) {
+        GSH_LOG("[GSH%d] Battery characteristic not readable/notifiable\n",
+                index);
+      }
     } else {
-      GSH_LOG("[GSH%d] Battery characteristic not readable\n", index);
+      GSH_LOG("[GSH%d] Battery characteristic not found\n", index);
     }
   } else {
     GSH_LOG("[GSH%d] No Battery Service (0x180F) found\n", index);
@@ -615,9 +660,12 @@ static void gsh_disconnect_device_internal(uint8_t index, bool send_sleep) {
   }
 
   // Clear characteristic pointers (invalidated after disconnect)
+  device->whitelist_exact_match = false;
   device->charFFE1 = nullptr;
   device->charFFE2 = nullptr;
   device->charFFE3 = nullptr;
+  device->charBattery = nullptr;
+  device->battery_notify_enabled = false;
 
   device->disconnect_time = millis();
   changeState(device, GSH_STATE_DISCONNECTED);
@@ -905,6 +953,57 @@ static uint16_t calculatePassword(BLEAddress *address) {
   }
 
   return sum;
+}
+
+static bool readBatteryLevel(gsh_device_t *device) {
+  if (device->charBattery == nullptr || !device->charBattery->canRead())
+    return false;
+
+  std::string value = device->charBattery->readValue();
+  if (value.length() < 1) {
+    GSH_LOG("[GSH%d] Battery read failed: empty value\n", device->index);
+    return false;
+  }
+
+  uint8_t battVal = (uint8_t)value[0];
+  if (battVal > 100) {
+    GSH_LOG("[GSH%d] Battery read invalid: %d\n", device->index, battVal);
+    return false;
+  }
+
+  device->battery_level = (int8_t)battVal;
+  GSH_LOG("[GSH%d] Battery level: %d%%\n", device->index, battVal);
+  return true;
+}
+
+static void configureBleTxPower() {
+  BLEDevice::setPower(ESP_PWR_LVL_P9, ESP_BLE_PWR_TYPE_DEFAULT);
+  BLEDevice::setPower(ESP_PWR_LVL_P9, ESP_BLE_PWR_TYPE_SCAN);
+  BLEDevice::setPower(ESP_PWR_LVL_P9, ESP_BLE_PWR_TYPE_ADV);
+  GSH_LOG("[BLE] TX power set to +9dBm\n");
+}
+
+static void updateConnectionParams(gsh_device_t *device) {
+  if (device->client == nullptr || !device->client->isConnected())
+    return;
+
+  BLEAddress peer = device->client->getPeerAddress();
+  esp_ble_conn_update_params_t conn_params = {};
+  memcpy(conn_params.bda, *peer.getNative(), sizeof(esp_bd_addr_t));
+  conn_params.min_int = GSH_CONN_MIN_INTERVAL;
+  conn_params.max_int = GSH_CONN_MAX_INTERVAL;
+  conn_params.latency = GSH_CONN_LATENCY;
+  conn_params.timeout = GSH_CONN_TIMEOUT;
+
+  esp_err_t err = esp_ble_gap_update_conn_params(&conn_params);
+  if (err == ESP_OK) {
+    GSH_LOG("[GSH%d] Requested conn params: %d-%d interval, latency=%d, "
+            "timeout=%d\n",
+            device->index, GSH_CONN_MIN_INTERVAL, GSH_CONN_MAX_INTERVAL,
+            GSH_CONN_LATENCY, GSH_CONN_TIMEOUT);
+  } else {
+    GSH_LOG("[GSH%d] Conn params update failed: %d\n", device->index, err);
+  }
 }
 
 static bool sendPassword(gsh_device_t *device) {

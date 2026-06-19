@@ -71,12 +71,14 @@ typedef struct {
   uint8_t index;
   BLEAddress *address;
   esp_ble_addr_type_t addr_type; // Address type from advertisement
+  bool whitelist_exact_match;    // Connected through a bound MAC slot
   gsh_fw_version_t fw_version;   // Detected firmware version
   BLEClient *client;
   BLEClientCallbacks *client_cb; // Persistent callbacks (prevent leak)
   BLERemoteCharacteristic *charFFE1; // RX Notify - ECG data
   BLERemoteCharacteristic *charFFE2; // TX Write - Commands
   BLERemoteCharacteristic *charFFE3; // Resend Notify - Response
+  BLERemoteCharacteristic *charBattery; // Standard Battery Level characteristic
   gsh_device_state_t state;
   uint16_t password;
   uint32_t state_enter_time;
@@ -90,6 +92,7 @@ typedef struct {
   uint32_t disconnect_time;     // When device was last disconnected
   uint8_t connect_fail_count;   // Consecutive connection failures
   int8_t battery_level;         // Battery level 0-100%, -1 if unknown
+  bool battery_notify_enabled;  // Battery Level notify subscription active
   uint8_t charging_status;      // 0=unknown, 1=charging, 2=not charging
   int8_t rssi;                  // BLE RSSI in dBm, 0 = unknown
 } gsh_device_t;

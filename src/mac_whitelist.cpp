@@ -74,6 +74,10 @@ bool whitelist_is_allowed(const uint8_t mac[6]) {
 }
 
 bool whitelist_is_exact_match(const uint8_t mac[6]) {
+  return whitelist_find_exact_slot(mac) >= 0;
+}
+
+int8_t whitelist_find_exact_slot(const uint8_t mac[6]) {
   uint8_t mac_rev[6];
   reverse_mac(mac, mac_rev);
 
@@ -83,11 +87,17 @@ bool whitelist_is_exact_match(const uint8_t mac[6]) {
       continue;
     // Match in either byte order
     if (memcmp(whitelist_macs[i], mac, 6) == 0)
-      return true;
+      return i;
     if (memcmp(whitelist_macs[i], mac_rev, 6) == 0)
-      return true;
+      return i;
   }
-  return false;
+  return -1;
+}
+
+bool whitelist_is_wildcard_slot(uint8_t slot) {
+  if (slot >= WHITELIST_MAX_SLOTS)
+    return false;
+  return memcmp(whitelist_macs[slot], WILDCARD_MAC, 6) == 0;
 }
 
 uint8_t whitelist_get_bound_count() {

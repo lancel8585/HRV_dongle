@@ -21,6 +21,12 @@ bool whitelist_is_allowed(const uint8_t mac[6]);
 // Check if a MAC address exactly matches any non-wildcard slot.
 bool whitelist_is_exact_match(const uint8_t mac[6]);
 
+// Return the exact matching non-wildcard slot for a MAC, or -1 if none.
+int8_t whitelist_find_exact_slot(const uint8_t mac[6]);
+
+// Return true if the whitelist slot is FF:FF:FF:FF:FF:FF.
+bool whitelist_is_wildcard_slot(uint8_t slot);
+
 // Return the number of non-wildcard (bound) slots.
 uint8_t whitelist_get_bound_count();
 
