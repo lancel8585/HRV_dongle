@@ -16,6 +16,18 @@ USBCDC USBData(0);
 // Static variables
 // ============================================================================
 static bool usb_initialized = false;
+static volatile bool usb_hw_connected = false;
+
+static void usb_event_handler(void *arg, esp_event_base_t event_base,
+                               int32_t event_id, void *event_data) {
+  if (event_id == ARDUINO_USB_STARTED_EVENT ||
+      event_id == ARDUINO_USB_RESUME_EVENT) {
+    usb_hw_connected = true;
+  } else if (event_id == ARDUINO_USB_STOPPED_EVENT ||
+             event_id == ARDUINO_USB_SUSPEND_EVENT) {
+    usb_hw_connected = false;
+  }
+}
 
 // Receive buffer for incoming commands from PC
 static uint8_t rx_buf[USB_PACKET_TOTAL_SIZE];
@@ -29,6 +41,9 @@ void usb_cdc_init(uint32_t baudrate) {
   // Initialize native USB CDC for data output (separate from debug UART)
   USBData.begin(baudrate);
   USB.begin();
+
+  // Register USB bus event handler to detect physical connection/disconnect
+  USB.onEvent(usb_event_handler);
 
   // Wait for native USB CDC to connect
   uint32_t start = millis();
@@ -258,7 +273,9 @@ void usb_cdc_process() {
   rx_pos = 0;
 }
 
-bool usb_cdc_is_connected() { return usb_initialized && USBData; }
+bool usb_cdc_is_connected() {
+  return usb_initialized && usb_hw_connected;
+}
 
 // ============================================================================
 // Packet size definition (20 bytes BLE -> 23 bytes USB)
